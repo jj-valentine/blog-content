@@ -1,0 +1,75 @@
+---
+title: "I Built a Personal AI Memory System (And Couldn't Stop)"
+description: "How an afternoon Supabase + pgvector experiment turned into a three-layer AI memory pipeline — with an Operator that synthesizes fragments, a Gatekeeper that scores quality, and you as the final say."
+date: "2026-03-17"
+category: "Engineering"
+tags: ["AI", "MCP", "memory", "TypeScript", "Supabase"]
+featured: true
+---
+
+# I Built a Personal AI Memory System (And Couldn't Stop)
+
+I started this because from day one, I sensed (like any decent developer or human with half-a-brain) that context engineering alone, or even a decent "saddle" as people are calling it, weren't going to get me where I wanted to go. Around the same time, I discovered my bald brother _Nate B. Jones_ (AI News & Strategy analyst) through a YouTube video he made about creating a "$0.10/month second brain" on Supabase + pgvector + MCP. So yeah... I'm a freaking genius (Claude told me) so I got the basic version running in an afternoon.
+
+## _Then I couldn't stop._
+
+The project is [cerebellum](https://github.com/jj-valentine/cerebellum/) — a personal, database-backed memory system that speaks MCP, and reads/writes/searches like an LLM (i.e. semantically), so any AI tool (Claude Code, Cursor, ChatGPT, Gemini, whatever ships next year) can query the same memory store without any integration work. _One protocol, every engine._
+
+I realize in some circles, everyone and their mom is either trying to build something like this, or they're skirting around the idea and just haven't gotten there yet. So, I wasn't going to share it — but it's just been so useful for me that it feels wrong not to.
+
+Here's what the architecture actually looks like, why it took a lot longer than an afternoon, and the ways it may be helpful for you:
+
+Three layers stand between a raw thought and permanent storage.
+
+### _1. The Operator_ (aka "Weaver", "Curator", "Compiler", etc.)
+
+> Going for a Matrix-type name to accompany and try to match the bad-assery of the "Gatekeeper" (see below), but I haven't been able to. Suggestions are encouraged — this one has been eating at me.
+
+Every capture — from the CLI or any AI tool — lands in a buffer before it touches the database. The Operator is an LLM running against that buffer that makes one of three calls:
+
+- `pass-through`: complete, self-contained thought → route to the next layer
+- `hold`: low-signal fragment → sit in the buffer, wait for related captures to arrive
+- `synthesise`: 2+ buffered entries share a theme → collapse them into one stronger insight, discard the fragments
+
+So if I jot three half-baked notes about a decision I'm wrestling with, the Operator catches and holds onto them. When the pattern solidifies, it compiles one coherent thought and routes that downstream. The fragments never reach the database. The whole buffer runs on a serialized async chain so concurrent captures don't corrupt each other, and TTL expiry never silently discards — expired entries route individually if synthesis fails.
+
+The race conditions and other issues that arose out of building this funnel are definitely the most interesting problems I've faced so far (aside from naming things after the Matrix + brain stuff).
+
+### _2. The Gatekeeper_
+
+What survives the Operator hits a second LLM evaluation. The GK scores each thought 1–10 (Noise → Insight-grade), generates an adversarial note for borderline items, checks for contradictions against existing thoughts in the DB, and flags veto violations — situations where a new capture would contradict a directive I've already marked as inviolable. It outputs a recommendation (keep, drop, improve, or "axiom") and a reformulation if it thinks the thought can be sharper.
+
+> By the way, _axiom_ is the idiotic neural-esque term I came up with for a _permanent directive that bypasses the normal filtering pipeline and tells every future AI session: "this rule is non-negotiable."_
+>
+> You can capture one with `memo --axiom "..."` — it skips the Operator entirely, goes straight to your review queue, and once approved, the Gatekeeper actively flags any future capture that would contradict it. It's not just stored differently — it's enforced differently.
+>
+> **TLDR;** an _axiom_ is a rule carved in stone, not a note on a whiteboard. A first-class thought.
+
+### _3. User_ ("the Architect" 🥸)
+
+I have the final say on everything. But I didn't want to always have to give that "say" during the moment I capture a thought. Hence, `memo review` walks me through the queue. For each item: score, analysis, the skeptic's note if it's borderline, suggested reformulation. I keep, drop, edit, or promote to _axiom_. Nothing reaches the database without explicit sign-off.
+
+## _Where is it going?_
+
+The part I'm most excited about is increasing the scope of cerebellum's observability — making it truly "watchable" so I can take my hands off the wheel. The idea: point it at any app — a terminal session, your editor, a browser tab, a desktop app — and have it observe passively. When it surfaces something worth capturing, the Operator handles clustering and synthesis; only what's genuinely signal makes it to the GK queue; **I get final say**. You could maintain a list of apps cerebellum is watching and tune the TTL and synthesis behavior per source.
+
+The HTTP daemon I'm building next makes this possible — an Express server on localhost with `/api/capture` and `/mcp` endpoints so anything can write to the pipeline. Browser extensions, editor plugins, voice input (Whisper API), Slack bots — all become capture surfaces. The three-layer funnel means I don't drown in noise just because the capture surface got wider.
+
+### _Beyond that..._
+
+- _Session hooks_ — at Claude Code session start, inject the top 5 semantically relevant memories for the current project. At stop, prompt to capture key decisions. Every session trains the system.
+- _Contradiction detection as a first-class feature_ — not just a warning, but surfacing when my thinking has shifted over time.
+- _Axiom library_ — a queryable collection of inviolable directives that agents are required to respect.
+- **_CEREBRO_** — the companion dashboard I'm building (currently called AgentHQ, renaming it to follow the brain theme). CEREBRO is the cockpit: what agents are running, what they cost, what they produced. Plug cerebellum in and give it a true brain — it starts optimizing over time. Two separate planes, no shared database.
+
+## _What would you add?_
+
+Next up for me: hooks, CRUD tools, and the HTTP daemon. A few other ideas I'm genuinely curious what others would prioritize:
+
+- Voice → brain via Whisper (capture while driving, walking, etc.)
+- Browser extension for one-click capture with auto URL + title
+- Knowledge graph layer (probably needs 500+ thoughts before it earns its complexity)
+- Privacy-tiered sharing — public thoughts exposed over a shared MCP endpoint for collaborators
+- Hybrid search: BM25 keyword + pgvector semantic combined for better precision on short queries
+
+The Operator's concurrency model (serialized Promise chain + stale-entry guards after every LLM call) is the most interesting engineering problem in here — happy to go deeper on that in a follow-up. Source is [on GitHub](https://github.com/jj-valentine/cerebellum) if you want to dig in now.
