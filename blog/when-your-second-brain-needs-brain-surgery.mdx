@@ -1,0 +1,291 @@
+---
+title: "When Your Second Brain Needs Brain Surgery"
+description: "I asked my AI memory system to find its own blueprint and watched it fail. Here's what three specialized agents — an adversary, a cognitive designer, and a market researcher — taught me about building memory systems that actually work."
+date: "2026-03-19"
+category: "Engineering"
+tags: ["AI", "agents", "memory", "Postgres", "architecture", "pgvector"]
+featured: true
+---
+
+# When Your Second Brain Needs Brain Surgery
+
+_The moment I realized my AI memory system couldn't find its own blueprint — and what three AI agents taught me about building one that actually works._
+
+---
+
+I've been building cerebellum — a personal second brain backed by Postgres, pgvector, and MCP. The basic premise is the same story as yours, your grandma's, and every other engineer who's tried building anything long-term using AI agents. Every AI (or AI-adjacent) tool I use — Claude, ChatGPT, Cursor, VS Code — reads from and writes to the same memory. Thoughts go in, get embedded, get classified, get stored. Semantic search pulls them back when context matters. One brain, every tool, no silos.
+
+It was working. Thoughts flowed in. The Operator layer synthesized raw input. The Gatekeeper ran quality checks and caught contradictions. I built an import system to bootstrap knowledge from CLAUDE.md files and .cursorrules, and have a much more ambitious plan for features to come — feeling pretty good about it, despite the nagging feeling that none of it matters and I'm a complete imposter (aka what the kids are calling a "vibe coder" these days).
+
+Recently, I asked cerebellum to pull up some simple information and watched it take a longer route than it needed to. That had me immediately ask: "Why didn't it just go straight there?" And then: "Is that a tradeoff of semantic/vectorized search? Is there some way to scaffold and support that search with other anchors beyond `tags` and `source`?" Then: "Wait... can I add refs to thoughts? Like, point a thought at a file or a URL?"
+
+I could feel the model I'd been building crumbling beneath my feet. Once again, questions broke everything.
+
+---
+
+## The Speculative Columns That Couldn't
+
+When I first designed cerebellum's schema, I did what every developer does when they're thinking three moves ahead: I added columns I might need later. Two of them, specifically:
+
+```sql
+create table thoughts (
+  id              uuid primary key default gen_random_uuid(),
+  content         text not null,
+  embedding       vector(1536),
+  metadata        jsonb not null default '{}',
+  -- ...
+  parent_id       uuid references thoughts(id),    -- "for lineage"
+  superseded_by   uuid references thoughts(id),    -- "for evolution"
+  confidence      float not null default 1.0,
+  -- ...
+);
+```
+
+`parent_id` — so a thought could point to its parent. "This thought derives from that one."
+
+`superseded_by` — so a thought could declare it was replaced by a newer version. "My thinking on X has evolved."
+
+Both made sense on paper. Both were structurally incapable of serving their purpose.
+
+Here's what I missed: the Operator layer produces multi-parent synthesis. It takes 2–3 existing thoughts as context — `target_ids` — and generates a new thought that draws from all of them. A single foreign key can point to exactly one parent. Multi-parent synthesis through a single FK is like trying to describe your family tree with one arrow that says "parent."
+
+And `superseded_by`? That requires the capture pipeline to search existing thoughts, identify which one the new thought replaces, and set the FK on the old row. The pipeline does none of that (yet). It embeds, classifies, stores, and moves on. `superseded_by` was a column that nothing in the system could populate.
+
+I'd been carrying dead schema for weeks. The mental model behind it was still sound — but the schema's inability to express the relationships it promised was starting to show.
+
+---
+
+## The Brain That Couldn't Find Its Own Plans
+
+Here's the part that stings. The master plan for cerebellum — the full architecture document, sprint breakdown, design rationale — lives at `~/.claude/plans/humble-gliding-thunder.md`. That filename is auto-generated. No thought in the brain pointed to it. No ref, no mention, no link.
+
+I tried: `semantic_search("cerebellum master plan")`. Nothing relevant came back.
+
+The brain didn't know where its own blueprint was stored. Admittedly, while I'd been building out new capture modes and synthesis features — theoretically making cerebellum smarter — I'd been putting off the most painful and valuable part of using it: seeding.
+
+Still, running into this wall became the strongest argument for refs, but also for something deeper. It wasn't enough to bolt on a `url` column. The question was: _how should thoughts relate to each other and to the external world?_
+
+That's an architecture question, not a feature request. And it had multiple parts I hadn't considered simultaneously before. I built this brain to think like an agent — semantically, using vectors and math — because I figured: "that's who's going to be using it." And just like that, I forgot the other half of the equation: myself, the human, the user. I'd been treating the agent model and the human model as separate concerns, toggling between them by context rather than integrating them by design.
+
+Only now, a few weeks in, had I reached a point that required me to stop sprinting entirely. Step back. Re-evaluate the whole thing.
+
+---
+
+## Three Agents, One Problem
+
+I did something I've been leaning into more lately: instead of noodling on this alone, I spun up three specialized AI agents in parallel, each attacking the problem from a different angle.
+
+**Agent 1: Adversarial Reviewer.** Job: break the current schema. Find every structural flaw, every assumption that doesn't hold, every abstraction that leaks. I used GPT-5.4 here — mix it up a little.
+
+**Agent 2: Cognitive Architecture Designer.** Job: redesign the thought model grounded in how human memory actually works — episodic, semantic, procedural. Claude Sonnet for the cognitive work.
+
+**Agent 3: Market Researcher.** Job: survey the 2026 PKM/second brain landscape. What are Mem0, Khoj, Supermemory, Capacities, Readwise, and others doing? What patterns have converged? Where are the gaps?
+
+The results came back within minutes. I was reading through the adversarial review — nodding along, feeling the weight of "yeah, `parent_id` was always wrong" — when the cognitive designer's report landed. Different framing, different vocabulary, completely different analytical method. Same conclusions. Then the market researcher came back with evidence that Mem0, Supermemory, and Khoj had all independently arrived at the same structural patterns.
+
+Three agents, zero coordination, and I'm staring at three documents that essentially drew the same architecture from three different starting points. That's when it stopped feeling like "here are some suggestions" and started feeling like "these are load-bearing truths about knowledge systems."
+
+---
+
+## What the Adversarial Reviewer Found
+
+The adversary was thorough and merciless. Beyond `parent_id` and `superseded_by`, it flagged:
+
+**The `mentions[]` array is a polluted graph from day one.** "Alice Smith", "Alice", and "@alice" are three different strings. You can't query "show me everything about Alice" when Alice exists in five variant spellings across your thought corpus. Entity normalization isn't optional — it's prerequisite for the graph to mean anything.
+
+**The `type` field is buried in JSONB but used as a first-class query dimension.** The stats function groups by type. The gatekeeper filters by type. The rule: if you write a `WHERE` clause against it, it's a column, not a JSONB field.
+
+**`confidence` is ignored in search ranking.** It exists in the schema. Nothing in the search function uses it. A thought with confidence 0.3 ("I think maybe...") ranks identically to a thought with confidence 1.0 ("I am certain"). That's not a minor oversight — it means the system can't distinguish between hypothesis and knowledge.
+
+The adversary also proposed something radical: throw away the mutable-row model entirely. Go append-only, Datomic-style. Every capture, retraction, and synthesis becomes an immutable event. Current state is a projection. No orphans, full audit trail, time-travel queries.
+
+That one I filed under "compelling but premature." The mutable model works fine at personal scale. But the append-only idea lodged itself in my brain as a potential v4.
+
+---
+
+## What the Cognitive Designer Proposed
+
+The cognitive agent approached from the other direction: not "what's broken in the schema" but "what does the schema need to model if it wants to mirror how memory actually works."
+
+Three types of memory, each with different storage needs:
+
+- **Episodic** — when, where, who. The situation in which a thought occurred. Not the content itself, but the anchoring context. "I realized this during a 2am debugging session while migrating the import pipeline."
+- **Semantic** — what, why. The factual content and reasoning. This is mostly what cerebellum already captures.
+- **Procedural** — how. Patterns, habits, workflows. Harder to capture explicitly, but important.
+
+The key insight was a new `context` column — a text field for episodic anchoring, separate from `content`. It influences the embedding (gets concatenated during vectorization) but displays distinctly. The "where/when/why was I when I thought this" is valuable retrieval signal that gets lost when flattened into the thought itself.
+
+Then: **`importance` is orthogonal to `confidence`.** This was a "well, obviously" moment once stated. Confidence = "I believe this is true." Importance = "this is worth surfacing." An axiom is both 5/5. An offhand observation about what I had for lunch might be confidence 1.0 but importance 1. They're independent dimensions.
+
+The designer also proposed `recalled_count` — a counter that increments every time a thought appears in search results. This draws on the Ebbinghaus spacing effect: rehearsal frequency is the strongest predictor of durable recall. Thoughts that keep getting retrieved are, empirically, the important ones. Give them a ranking bonus.
+
+This led to the crown jewel: `assemble_context()`, a SQL function that replaces pure cosine similarity with a weighted multi-factor ranking:
+
+```sql
+-- Weighted context assembly (replaces pure cosine search)
+-- similarity × 0.65 + recency × 0.20 + importance × 0.15 + rehearsal_bonus
+
+create function assemble_context(
+  query_embedding vector(1536),
+  match_count     int   default 10,
+  threshold       float default 0.5
+)
+returns table (
+  id             uuid,
+  content        text,
+  context        text,
+  metadata       jsonb,
+  source         text,
+  created_at     timestamptz,
+  composite_score float
+)
+language sql stable
+as $$
+  select
+    t.id,
+    t.content,
+    t.context,
+    t.metadata,
+    t.source,
+    t.created_at,
+    (
+      (1 - (t.embedding <=> query_embedding)) * 0.65
+      + (1.0 / (1 + extract(epoch from now() - t.created_at) / 86400)) * 0.20
+      + (coalesce(t.importance, 3) / 5.0) * 0.15
+      + least(coalesce(t.recalled_count, 0)::float / 50.0, 0.1)
+    ) as composite_score
+  from thoughts t
+  where 1 - (t.embedding <=> query_embedding) >= threshold
+  order by composite_score desc
+  limit match_count;
+$$;
+```
+
+This function isn't deployed yet — it's the design target for the next sprint. But the logic is sound. Pure cosine similarity has a well-known failure mode: it returns near-duplicates. If you captured the same idea three different ways, all three come back and crowd out different-but-relevant thoughts. `assemble_context()` balances semantic similarity with recency, stated importance, and empirical retrieval frequency. The weights are tunable. The function fits in one SQL statement.
+
+---
+
+## What the Market Researcher Found
+
+Agent 3 surveyed eight systems across the PKM/second brain landscape. Some findings that reshaped my thinking:
+
+**Hybrid retrieval is table stakes.** Every serious system in 2026 does vector similarity plus reranking — a cross-encoder, BM25, or LLM-guided second pass. Single-stage cosine search is first-generation. Cerebellum's `search_thoughts` is first-generation.
+
+**Graph layers augment vectors, they don't replace them.** Mem0 runs Neo4j alongside its vector store. Supermemory has ontology-aware edges. The pattern: vectors handle "what is this similar to," graphs handle "what is this related to." Similar and related aren't the same thing.
+
+**Memory is not RAG.** This distinction matters. RAG returns stateless document chunks — you retrieve text, stuff it in a prompt, and the LLM uses it. Memory returns stateful, evolving facts that can be updated, contradicted, superseded, and expired. Cerebellum's Gatekeeper already does contradiction detection, which puts it on the memory side of this divide. But the schema wasn't fully supporting it.
+
+**Automatic forgetting matters.** Supermemory auto-expires temporary facts. Mem0 supports expiration timestamps. A brain that never forgets is a hoarder, not a thinker. I'd been treating every thought as permanent. Some thoughts have a natural TTL — "the deploy is broken" is useful today and noise next month.
+
+**Typed objects beat flat thoughts.** Capacities and Tana distinguish entity types with different property schemas. A person-thought has different relevant fields than an idea-thought. Cerebellum's `type` field in JSONB was a step toward this, but a timid one.
+
+---
+
+## Where All Three Converged
+
+Here's what struck me: three agents with different mandates, different knowledge bases, and different analytical frames arrived at the same structural conclusions.
+
+All three said `parent_id` can't represent multi-parent synthesis. Replace it with a typed-edge join table.
+
+All three said `mentions[]` strings are broken. Normalize entities.
+
+All three said external references need their own table.
+
+All three said pure cosine search is insufficient for intelligent retrieval.
+
+All three said topics can stay in JSONB — they're ad-hoc tags, not entities.
+
+The convergence wasn't coordinated. It emerged because the problems are real. When independent analyses point at the same joints, you can trust that those joints are actually bearing the load.
+
+---
+
+## The New Architecture
+
+The synthesis produced a clean set of changes:
+
+**Drop** `parent_id` and `superseded_by` from the thoughts table. Replace with:
+
+```sql
+create table thought_relations (
+  from_id    uuid references thoughts(id) not null,
+  to_id      uuid references thoughts(id) not null,
+  kind       text not null,  -- derives_from | supersedes | supports
+                              -- | contradicts | refines | related
+  created_at timestamptz not null default now(),
+  primary key (from_id, to_id, kind)
+);
+```
+
+This is a typed-edge graph. A thought can derive from three parents. Two thoughts can contradict each other while both supporting a third. The `kind` column makes relationships queryable — "show me everything this thought contradicts" is a single WHERE clause. And because `supersedes` is now a relationship rather than a column on the superseded row, it can be set by the Gatekeeper or Operator without requiring the capture pipeline to search for existing thoughts.
+
+**Add entity normalization:**
+
+```sql
+create table entities (
+  id      uuid primary key default gen_random_uuid(),
+  kind    text not null,  -- person | project | concept
+  name    text not null,
+  aliases text[] default '{}',
+  notes   text
+);
+
+create table thought_entities (
+  thought_id uuid references thoughts(id),
+  entity_id  uuid references entities(id),
+  role       text,  -- mentioned | about | by
+  primary key (thought_id, entity_id)
+);
+```
+
+"Alice Smith", "Alice", and "@alice" map to one entity row. The `aliases` array handles variant spellings. `role` distinguishes "mentioned in passing" from "this thought is about this person." The `mentions[]` JSONB field becomes a denormalized cache at best, a migration artifact at worst.
+
+**Add external refs:**
+
+```sql
+create table thought_refs (
+  id         uuid primary key default gen_random_uuid(),
+  thought_id uuid references thoughts(id) not null,
+  kind       text not null,  -- file | url | plan | repo | doc
+  uri        text not null,
+  label      text
+);
+```
+
+Now a thought can point to `~/.claude/plans/humble-gliding-thunder.md` with `kind: 'plan'` and `label: 'cerebellum master plan'`. Semantic search for "master plan" still works via the thought's content and embedding — but `thought_refs` means the brain knows _where_ things live, not only _what_ they contain.
+
+**Add to the thoughts table:** `context` (episodic anchoring), `importance` (1–5, orthogonal to confidence), `recalled_count` (rehearsal tracker), `occurred_at` (when it happened vs when it was captured), `expires_at` (TTL for temporary facts), and promote `type` from JSONB to a first-class indexed column.
+
+---
+
+## What I Learned About Multi-Agent Design
+
+The process taught me something about how to use AI agents on architecture problems. Running three agents with different specializations in parallel isn't three times the work — it's a different kind of work entirely. Each agent has blind spots shaped by its mandate:
+
+- The adversary finds what's broken but can't propose what to build.
+- The designer proposes what to build but may not stress-test it against market reality.
+- The market researcher knows what others have built but can't map it to your specific codebase.
+
+The synthesis — deciding what to keep, what to drop, where the agents agree and where they diverge — that's still a human job. The agents converged on the graph table and entity normalization. They diverged on whether to keep `parent_id`/`superseded_by` (the cognitive designer wanted to keep them for structural lineage; the adversary wanted them gone; the final call was to drop them). They diverged on the storage model (append-only events vs. mutable documents vs. LLM-driven state). Those divergences are where the actual design decisions live.
+
+I'm becoming convinced that for any system design question worth asking, the right move is to spin up multiple specialized perspectives and look for convergence. Not because any single agent is unreliable — but because convergence from independent analysis is a higher-confidence signal than any single deep dive.
+
+---
+
+## What's Next
+
+This architecture review is now the roadmap for Sprint 2. The changes break down into:
+
+1. **Schema v3 migration** — add new columns, create new tables, migrate data.
+2. **Entity normalization pipeline** — extract and deduplicate entities from existing thoughts, wire into the capture pipeline.
+3. **`assemble_context()` deployment** — replace `search_thoughts` as the primary retrieval function.
+4. **`thought_refs` in the capture pipeline** — let thoughts point at files, URLs, plans.
+5. **`recalled_count` integration** — wire `bump_recalled()` into the MCP search tool response path.
+6. **`expires_at` support** — TTL-based cleanup for temporary facts.
+
+The irony isn't lost on me. I started by asking "can I add refs to thoughts?" and ended up redesigning the memory model. But that's how architecture works — you pull one thread and discover the sweater was held together by assumptions.
+
+The brain that couldn't find its own blueprint is about to get the surgery it needs. And this time, there'll be a thought pointing to the plan file.
+
+---
+
+_cerebellum is open source at [github.com/jj-valentine/cerebellum](https://github.com/jj-valentine/cerebellum). Part of a larger agentic infrastructure stack: cerebellum for memory, CEREBRO (prev Agent HQ) for orchestration and governance. More on those when they're fully ready._
